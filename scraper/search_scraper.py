@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Robust eBay search → Telegram scraper
-Playwright 1.40+ | python-telegram-bot 20+
+Definitive eBay search → Telegram scraper
+(JS-evaluated extraction for headless CI)
 """
 
 import os
@@ -12,24 +12,16 @@ from datetime import datetime, timezone
 from playwright.async_api import async_playwright
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-# ---------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Export TELEGRAM_BOT_TOKEN first")
 
-# ---------------------------------------------------------------------
-# Scraper
-# ---------------------------------------------------------------------
+
 class EbaySearchScraper:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str):
         self.bot = Bot(token)
 
-    # -----------------------------------------------------------------
-    # Safe editor
-    # -----------------------------------------------------------------
-    async def _edit(self, chat_id: int, msg_id: int, text: str, buttons=None) -> None:
+    async def _edit(self, chat_id, msg_id, text, buttons=None):
         try:
             await self.bot.edit_message_text(
                 chat_id=chat_id,
@@ -38,12 +30,9 @@ class EbaySearchScraper:
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
             )
-        except Exception as exc:
-            print(f"[WARN] edit fail: {exc}")
+        except Exception as e:
+            print(f"[WARN] edit fail: {e}")
 
-    # -----------------------------------------------------------------
-    # MarkdownV2 escape
-    # -----------------------------------------------------------------
     @staticmethod
     def _esc(text: str) -> str:
         text = text.replace("\\", "\\\\")
@@ -51,25 +40,17 @@ class EbaySearchScraper:
             text = text.replace(ch, "\\" + ch)
         return text
 
-    # -----------------------------------------------------------------
-    # Core
-    # -----------------------------------------------------------------
-    async def scrape_search(self, keyword: str, chat_id: int) -> None:
+    async def scrape_search(self, keyword: str, chat_id: int):
         msg = await self.bot.send_message(
-            chat_id=chat_id,
-            text="⏳ *Booting eBay scraper…*",
+            chat_id,
+            "⏳ *Booting eBay scraper…*",
             parse_mode="MarkdownV2",
         )
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ],
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
 
             ctx = await browser.new_context(
@@ -81,127 +62,54 @@ class EbaySearchScraper:
                 viewport={"width": 1280, "height": 720},
             )
 
-            await ctx.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            )
-
             page = await ctx.new_page()
 
-            # -------------------------------------------------------------
-            # 1. Load search
-            # -------------------------------------------------------------
-            await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* \\[1/4\\]")
+            # 1. Load
+            await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay…* \\[1/4\\]")
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
-            await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            await asyncio.sleep(3)
+            await page.goto(url, wait_until="networkidle", timeout=60_000)
+            await asyncio.sleep(5)
 
-            # -------------------------------------------------------------
-            # 2. CAPTCHA check
-            # -------------------------------------------------------------
-            await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* \\[2/4\\]")
-            title = (await page.title()).lower()
-            if any(x in title for x in ("captcha", "robot")):
-                await self._edit(chat_id, msg.message_id, "❌ eBay CAPTCHA – try later.")
-                await browser.close()
-                return
+            # 2. Scroll
+            await self._edit(chat_id, msg.message_id, "⏳ *Rendering products…* \\[2/4\\]")
+            for _ in range(6):
+                await page.evaluate("window.scrollBy(0, 1200)")
+                await asyncio.sleep(1.2)
 
-            # -------------------------------------------------------------
-            # 3. Scroll
-            # -------------------------------------------------------------
-            await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* \\[3/4\\]")
-            for _ in range(4):
-                await page.evaluate("window.scrollBy(0, 1000)")
-                await asyncio.sleep(1.4)
+            # 3. JS extraction (CRITICAL FIX)
+            await self._edit(chat_id, msg.message_id, "⏳ *Extracting products…* \\[3/4\\]")
 
-            # -------------------------------------------------------------
-            # 4. Collect products (ROBUST)
-            # -------------------------------------------------------------
-            await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* \\[4/4\\]")
-            await page.wait_for_timeout(4000)
+            products = await page.evaluate(
+                """
+                () => {
+                  const items = [];
+                  document.querySelectorAll('a[href*="/itm/"]').forEach(a => {
+                    const root = a.closest('li, div');
+                    if (!root) return;
 
-            selectors = [
-                "li.s-item",
-                "div.s-item",
-                "div.s-item__wrapper",
-            ]
+                    const title =
+                      root.querySelector('h3')?.innerText ||
+                      root.querySelector('.s-item__title')?.innerText;
 
-            raw_items = None
-            used_selector = None
+                    const price =
+                      root.querySelector('.s-item__price')?.innerText;
 
-            for sel in selectors:
-                loc = page.locator(sel)
-                if await loc.count() > 5:
-                    raw_items = loc
-                    used_selector = sel
-                    break
+                    if (!title || !price) return;
+                    if (title.toLowerCase().includes('shop on ebay')) return;
 
-            if raw_items is None:
-                ss = await page.screenshot(
-                    clip={"x": 0, "y": 0, "width": 1280, "height": 720}
-                )
-                await self.bot.send_photo(
-                    chat_id,
-                    photo=ss,
-                    caption="eBay page rendered but DOM variant not detected",
-                    parse_mode=None,
-                )
-                await browser.close()
-                return
+                    items.push({
+                      id: a.href.split('/').pop().split('?')[0],
+                      title: title.trim(),
+                      price: price.trim(),
+                      ship: root.querySelector('.s-item__shipping')?.innerText || ''
+                    });
+                  });
+                  return items;
+                }
+                """
+            )
 
-            total = await raw_items.count()
-            print(f"[INFO] Selector: {used_selector} | Raw items: {total}")
-
-            products = []
-
-            for i in range(total):
-                li = raw_items.nth(i)
-                try:
-                    title_el = li.locator(
-                        "h3.s-item__title, span.s-item__title, h3"
-                    )
-                    if await title_el.count() == 0:
-                        continue
-
-                    title = (await title_el.first.inner_text()).strip()
-                    if not title or "shop on ebay" in title.lower():
-                        continue
-
-                    price_el = li.locator("span.s-item__price")
-                    if await price_el.count() == 0:
-                        continue
-                    price = (await price_el.first.inner_text()).strip()
-
-                    ship_el = li.locator("span.s-item__shipping")
-                    ship = (
-                        (await ship_el.first.inner_text()).strip()
-                        if await ship_el.count()
-                        else ""
-                    )
-
-                    link_el = li.locator("a[href*='/itm/']")
-                    href = (
-                        await link_el.first.get_attribute("href")
-                        if await link_el.count()
-                        else None
-                    )
-                    if not href:
-                        continue
-
-                    item_id = href.split("/")[-1].split("?")[0]
-
-                    products.append(
-                        {
-                            "id": item_id,
-                            "title": title[:85],
-                            "price": price,
-                            "ship": ship,
-                        }
-                    )
-
-                except Exception as exc:
-                    print(f"[WARN] skip item: {exc}")
-
-            print(f"[INFO] Extracted products: {len(products)}")
+            print(f"[INFO] JS extracted: {len(products)} items")
 
             if not products:
                 ss = await page.screenshot(
@@ -210,15 +118,13 @@ class EbaySearchScraper:
                 await self.bot.send_photo(
                     chat_id,
                     photo=ss,
-                    caption="Products visible but extraction returned empty",
+                    caption="Rendered visually but JS extraction returned empty",
                     parse_mode=None,
                 )
                 await browser.close()
                 return
 
-            # -------------------------------------------------------------
-            # Screenshot
-            # -------------------------------------------------------------
+            # 4. Screenshot
             ss = await page.screenshot(
                 clip={"x": 0, "y": 0, "width": 1280, "height": 720}
             )
@@ -229,15 +135,13 @@ class EbaySearchScraper:
                 parse_mode="MarkdownV2",
             )
 
-            # -------------------------------------------------------------
-            # Text report
-            # -------------------------------------------------------------
+            # 5. Text report
             text = f"🔍 *eBay search:* `{self._esc(keyword)}`\n\n"
             buttons = []
 
-            for idx, p in enumerate(products, 1):
+            for i, p in enumerate(products[:10], 1):
                 text += (
-                    f"{idx}\\. **{self._esc(p['title'])}**\n"
+                    f"{i}\\. **{self._esc(p['title'][:80])}**\n"
                     f"   💰 ||{self._esc(p['price'])}||"
                 )
                 if p["ship"]:
@@ -245,12 +149,7 @@ class EbaySearchScraper:
                 text += "\n\n"
 
                 buttons.append(
-                    [
-                        InlineKeyboardButton(
-                            text=f"📦 View {idx}",
-                            url=f"https://www.ebay.com/itm/{p['id']}",
-                        )
-                    ]
+                    [InlineKeyboardButton(f"📦 View {i}", url=f"https://www.ebay.com/itm/{p['id']}")]
                 )
 
             utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -260,10 +159,7 @@ class EbaySearchScraper:
             await browser.close()
 
 
-# ---------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------
-async def main() -> None:
+async def main():
     if len(sys.argv) != 3:
         print("Usage: python scraper/search_scraper.py <keyword> <chat_id>")
         sys.exit(1)
