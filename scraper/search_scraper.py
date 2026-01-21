@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Modern eBay search → Telegram scraper
+Robust eBay search → Telegram scraper
 Playwright 1.40+ | python-telegram-bot 20+
 """
 
@@ -9,7 +9,7 @@ import sys
 import asyncio
 from datetime import datetime, timezone
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from playwright.async_api import async_playwright
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 # ---------------------------------------------------------------------
@@ -27,6 +27,8 @@ class EbaySearchScraper:
         self.bot = Bot(token)
 
     # -----------------------------------------------------------------
+    # Safe editor
+    # -----------------------------------------------------------------
     async def _edit(self, chat_id: int, msg_id: int, text: str, buttons=None) -> None:
         try:
             await self.bot.edit_message_text(
@@ -40,6 +42,8 @@ class EbaySearchScraper:
             print(f"[WARN] edit fail: {exc}")
 
     # -----------------------------------------------------------------
+    # MarkdownV2 escape
+    # -----------------------------------------------------------------
     @staticmethod
     def _esc(text: str) -> str:
         text = text.replace("\\", "\\\\")
@@ -47,6 +51,8 @@ class EbaySearchScraper:
             text = text.replace(ch, "\\" + ch)
         return text
 
+    # -----------------------------------------------------------------
+    # Core
     # -----------------------------------------------------------------
     async def scrape_search(self, keyword: str, chat_id: int) -> None:
         msg = await self.bot.send_message(
@@ -81,13 +87,17 @@ class EbaySearchScraper:
 
             page = await ctx.new_page()
 
-            # 1. Load
+            # -------------------------------------------------------------
+            # 1. Load search
+            # -------------------------------------------------------------
             await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* \\[1/4\\]")
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
             await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             await asyncio.sleep(3)
 
+            # -------------------------------------------------------------
             # 2. CAPTCHA check
+            # -------------------------------------------------------------
             await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* \\[2/4\\]")
             title = (await page.title()).lower()
             if any(x in title for x in ("captcha", "robot")):
@@ -95,41 +105,60 @@ class EbaySearchScraper:
                 await browser.close()
                 return
 
+            # -------------------------------------------------------------
             # 3. Scroll
+            # -------------------------------------------------------------
             await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* \\[3/4\\]")
             for _ in range(4):
                 await page.evaluate("window.scrollBy(0, 1000)")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.4)
 
-            # 4. Wait ONLY for containers (SAFE)
+            # -------------------------------------------------------------
+            # 4. Collect products (ROBUST)
+            # -------------------------------------------------------------
             await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* \\[4/4\\]")
+            await page.wait_for_timeout(4000)
 
-            try:
-                await page.wait_for_selector("li.s-item", timeout=30_000)
-            except PWTimeout:
+            selectors = [
+                "li.s-item",
+                "div.s-item",
+                "div.s-item__wrapper",
+            ]
+
+            raw_items = None
+            used_selector = None
+
+            for sel in selectors:
+                loc = page.locator(sel)
+                if await loc.count() > 5:
+                    raw_items = loc
+                    used_selector = sel
+                    break
+
+            if raw_items is None:
                 ss = await page.screenshot(
                     clip={"x": 0, "y": 0, "width": 1280, "height": 720}
                 )
                 await self.bot.send_photo(
                     chat_id,
                     photo=ss,
-                    caption="eBay loaded but no result containers",
+                    caption="eBay page rendered but DOM variant not detected",
                     parse_mode=None,
                 )
                 await browser.close()
                 return
 
-            raw_items = page.locator("li.s-item")
             total = await raw_items.count()
-            print(f"[INFO] Raw items: {total}")
+            print(f"[INFO] Selector: {used_selector} | Raw items: {total}")
 
             products = []
 
             for i in range(total):
                 li = raw_items.nth(i)
-
                 try:
-                    title_el = li.locator("h3.s-item__title, span.s-item__title")
+                    title_el = li.locator(
+                        "h3.s-item__title, span.s-item__title, h3"
+                    )
                     if await title_el.count() == 0:
                         continue
 
@@ -143,10 +172,18 @@ class EbaySearchScraper:
                     price = (await price_el.first.inner_text()).strip()
 
                     ship_el = li.locator("span.s-item__shipping")
-                    ship = (await ship_el.first.inner_text()).strip() if await ship_el.count() else ""
+                    ship = (
+                        (await ship_el.first.inner_text()).strip()
+                        if await ship_el.count()
+                        else ""
+                    )
 
-                    link_el = li.locator("a.s-item__link")
-                    href = await link_el.get_attribute("href")
+                    link_el = li.locator("a[href*='/itm/']")
+                    href = (
+                        await link_el.first.get_attribute("href")
+                        if await link_el.count()
+                        else None
+                    )
                     if not href:
                         continue
 
@@ -155,7 +192,7 @@ class EbaySearchScraper:
                     products.append(
                         {
                             "id": item_id,
-                            "title": title[:80],
+                            "title": title[:85],
                             "price": price,
                             "ship": ship,
                         }
@@ -179,7 +216,9 @@ class EbaySearchScraper:
                 await browser.close()
                 return
 
+            # -------------------------------------------------------------
             # Screenshot
+            # -------------------------------------------------------------
             ss = await page.screenshot(
                 clip={"x": 0, "y": 0, "width": 1280, "height": 720}
             )
@@ -190,7 +229,9 @@ class EbaySearchScraper:
                 parse_mode="MarkdownV2",
             )
 
+            # -------------------------------------------------------------
             # Text report
+            # -------------------------------------------------------------
             text = f"🔍 *eBay search:* `{self._esc(keyword)}`\n\n"
             buttons = []
 
@@ -219,13 +260,15 @@ class EbaySearchScraper:
             await browser.close()
 
 
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------
 async def main() -> None:
     if len(sys.argv) != 3:
         print("Usage: python scraper/search_scraper.py <keyword> <chat_id>")
         sys.exit(1)
 
-    scraper = EbaySearchScraper(os.environ["TELEGRAM_BOT_TOKEN"])
+    scraper = EbaySearchScraper(BOT_TOKEN)
     await scraper.scrape_search(sys.argv[1], int(sys.argv[2]))
 
 
