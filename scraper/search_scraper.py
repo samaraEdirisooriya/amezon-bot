@@ -1,249 +1,212 @@
+#!/usr/bin/env python3
+"""
+Modern eBay-search → Telegram scraper
+Playwright 1.40+  | python-telegram-bot 20+
+"""
+
 import os
 import sys
 import asyncio
+from datetime import datetime, timezone
+
 from playwright.async_api import async_playwright
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from datetime import datetime
 
+# ---------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Export TELEGRAM_BOT_TOKEN first")
 
+# ---------------------------------------------------------------------
+# Scraper
+# ---------------------------------------------------------------------
 class EbaySearchScraper:
-    def __init__(self, token: str):
-        self.bot = Bot(token=token)
+    def __init__(self, token: str) -> None:
+        self.bot = Bot(token)
 
-    # ------------------------------------------------------------------
-    # Helper: edit message safely
-    # ------------------------------------------------------------------
-    async def edit_message(self, chat_id, message_id, text, buttons=None):
+    # -----------------------------------------------------------------
+    # Safe message editor
+    # -----------------------------------------------------------------
+    async def _edit(
+        self, chat_id: int, msg_id: int, text: str, buttons=None
+    ) -> None:
         try:
             await self.bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=message_id,
+                message_id=msg_id,
                 text=text,
-                parse_mode="Markdown",
+                parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
             )
         except Exception as exc:
-            print(f"[WARN] Edit failed: {exc}")
+            print(f"[WARN] edit fail: {exc}")
 
-    # ------------------------------------------------------------------
-    # Core: scrape eBay search
-    # ------------------------------------------------------------------
-    async def scrape_search(self, keyword: str, chat_id: int):
-        # 0. send “please wait”
+    # -----------------------------------------------------------------
+    # Core
+    # -----------------------------------------------------------------
+    async def scrape_search(self, keyword: str, chat_id: int) -> None:
+        # 0. boot message
         msg = await self.bot.send_message(
             chat_id=chat_id,
-            text="⏳ *Booting eBay scraper …*",
-            parse_mode="Markdown",
+            text="⏳ *Booting eBay scraper…*",
+            parse_mode="MarkdownV2",
         )
 
-        async with async_playwright() as p:
+        async with async_playwright() as pw:
             # 1. stealth browser
-            browser = await p.chromium.launch(
+            browser = await pw.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
-                    "--disable-accelerated-2d-canvas",
-                    "--no-first-run",
-                    "--no-zygote",
                     "--disable-gpu",
                     "--disable-web-security",
                     "--disable-features=VizDisplayCompositor",
                 ],
             )
-
-            context = await browser.new_context(
+            ctx = await browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
+                    "Chrome/123.0.0.0 Safari/537.36"
                 ),
-                viewport={"width": 1920, "height": 1080},
+                viewport={"width": 1280, "height": 720},
             )
-
-            await context.add_init_script("""
+            await ctx.add_init_script(
+                """
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
                 window.chrome = {runtime: {}};
-                delete navigator.__proto__.connection;
-                Object.defineProperty(document, 'hidden', {get: () => false});
-            """)
-
-            page = await context.new_page()
-
-            # 2. build eBay search URL
-            search_url = (
-                "https://www.ebay.com/sch/i.html?"
-                f"_nkw={keyword.replace(' ', '+')}&_sop=12"
+                """
             )
-            print(f"[INFO] Loading {search_url}")
+            page = await ctx.new_page()
 
-            await self.edit_message(
-                chat_id, msg.message_id, "⏳ *Loading eBay search …* [1/4]"
-            )
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=60_000)
-            await asyncio.sleep(3)
+            # 2. load eBay
+            await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* `[1/4]`")
+            url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
+            await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            await asyncio.sleep(2)
 
-            # 3. quick captcha check
-            await self.edit_message(
-                chat_id, msg.message_id, "⏳ *Checking for bot wall …* [2/4]"
-            )
-            title = await page.title()
-            if any(x in title.lower() for x in ("captcha", "robot", "verify")):
-                await self.edit_message(
-                    chat_id,
-                    msg.message_id,
-                    "❌ eBay asked for CAPTCHA – please try again later.",
-                )
-                await browser.close()
+            # 3. captcha check
+            await self._edit(chat_id, msg.message_id, "⏳ *Bot-wall check…* `[2/4]`")
+            if any(x in (await page.title()).lower() for x in ("captcha", "robot")):
+                await self._edit(chat_id, msg.message_id, "❌ eBay CAPTCHA – try later.")
                 return
 
-            # 4. scroll to trigger lazy images
-            await self.edit_message(
-                chat_id, msg.message_id, "⏳ *Scrolling for items …* [3/4]"
-            )
+            # 4. scroll for lazy images
+            await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* `[3/4]`")
             for i in range(3):
-                await page.evaluate("window.scrollBy(0, 1000)")
-                await asyncio.sleep(2)
-                print(f"[INFO] Scroll {i+1}/3")
+                await page.evaluate("window.scrollBy(0, 800)")
+                await asyncio.sleep(1.5)
 
-            # 5. pick best selector
-            await self.edit_message(
-                chat_id, msg.message_id, "⏳ *Collecting products …* [4/4]"
-            )
-            selectors = [
-                "li.s-item",                    # modern desktop
-                "div.s-item__wrapper",          # fallback
-                "[data-view='mi:1686|iid:1']",  # occasional
-            ]
+            # 5. grab items
+            await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* `[4/4]`")
+            selectors = ["li.s-item", "div.s-item__wrapper"]
             items = []
             for sel in selectors:
-                try:
-                    items = await page.locator(sel).all(timeout=15_000)
-                    if len(items) > 2:
-                        print(f"[INFO] Using selector {sel} – {len(items)} items")
-                        break
-                except Exception as e:
-                    print(f"[WARN] Selector {sel} failed: {e}")
-                    continue
+                items = await page.locator(sel).all()  # NO timeout
+                if len(items) > 2:
+                    print(f"[INFO] {len(items)} items via {sel}")
+                    break
 
             if not items:
-                await self.edit_message(
-                    chat_id,
-                    msg.message_id,
-                    "❌ No products found – sending debug screenshot …",
-                )
                 ss = await page.screenshot(full_page=True)
-                await self.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=ss,
-                    caption=f"Debug:\nTitle: {title}\nURL: {search_url}",
-                )
-                await browser.close()
+                await self.bot.send_photo(chat_id, photo=ss, caption="❌ No items found")
                 return
 
-            # 6. extract data (limit 5)
+            # 6. extract
             products = []
-            for idx, li in enumerate(items[:5], 1):
+            for idx, li in enumerate(items[:6], 1):
                 try:
-                    # title
-                    title_sel = li.locator(
-                        "h3.s-item__title, .s-item__title span, a.s-item__link span"
-                    )
-                    title_txt = (
-                        await title_sel.inner_text(timeout=3_000)
-                        if await title_sel.count()
-                        else "N/A"
-                    )
-                    title_txt = (
-                        (title_txt[:60] + "…") if len(title_txt) > 60 else title_txt
-                    )
-
-                    # price
-                    price_sel = li.locator(
-                        "span.s-item__price, .s-item__price .notranslate"
-                    )
-                    price_txt = (
-                        await price_sel.inner_text(timeout=3_000)
-                        if await price_sel.count()
-                        else "N/A"
-                    )
-
-                    # itemId (eBay’s ASIN)
-                    link_sel = li.locator("a.s-item__link")
-                    href = (
-                        await link_sel.get_attribute("href")
-                        if await link_sel.count()
-                        else ""
-                    )
-                    item_id = href.split("/")[-1].split("?")[0] if href else f"id_{idx}"
-
-                    # shipping
-                    ship_sel = li.locator("span.s-item__shipping, .s-item__logisticsCost")
-                    ship_txt = (
-                        await ship_sel.inner_text(timeout=3_000)
-                        if await ship_sel.count()
-                        else ""
-                    )
-
-                    products.append(
-                        {
-                            "id": item_id,
-                            "title": title_txt,
-                            "price": price_txt,
-                            "ship": ship_txt,
-                        }
-                    )
-                    print(f"[INFO] {idx}) {title_txt[:40]} – {price_txt}")
-                except Exception as e:
-                    print(f"[WARN] Item {idx} skipped: {e}")
-                    continue
-
-            await browser.close()
+                    title = (
+                        await li.locator("h3.s-item__title, .s-item__title span")
+                        .first.inner_text(timeout=3_000)
+                    ).replace("\n", " ")[:70]
+                    price = (
+                        await li.locator("span.s-item__price").first.inner_text(timeout=3_000)
+                    ).strip()
+                    ship = (
+                        await li.locator("span.s-item__shipping").first.inner_text(timeout=3_000)
+                    ).strip() or ""
+                    href = await li.locator("a.s-item__link").first.get_attribute("href")
+                    item_id = href.split("/")[-1].split("?")[0] if href else f"id{idx}"
+                    products.append({"id": item_id, "title": title, "price": price, "ship": ship})
+                except Exception as exc:
+                    print(f"[WARN] skip item {idx}: {exc}")
 
             if not products:
-                await self.edit_message(
-                    chat_id, msg.message_id, "❌ Could not extract any product data."
-                )
+                await self._edit(chat_id, msg.message_id, "❌ Could not extract data.")
                 return
 
-            # 7. send screenshot
-            ss = await page.screenshot(full_page=False, size={"width": 1200, "height": 800})
+            # 7. carousel screenshot (Telegram safe)
+            ss = await page.screenshot(clip={"x": 0, "y": 0, "width": 1280, "height": 720})
             await self.bot.send_photo(
                 chat_id=chat_id,
                 photo=ss,
-                caption=f"📸 eBay search results for *{keyword}*",
-                parse_mode="Markdown",
+                caption=f"📸 *eBay results for* `{keyword}`",
+                parse_mode="MarkdownV2",
             )
 
-            # 8. format message
-            text = f"🔍 *eBay search: “{keyword}”*\n\n"
+            # 8. pretty message
+            text = f"🔍 *eBay search:* `{keyword}`\n\n"
             buttons = []
             for idx, p in enumerate(products, 1):
-                text += f"{idx}. **{p['title']}**\n"
-                text += f"   💰 {p['price']}"
-                text += f"   🚚 {p['ship']}\n\n" if p["ship"] else "\n\n"
+                # spoiler price for fun
+                text += (
+                    f"{idx}\\. **{self._esc(p['title'])}**\n"
+                    f"   💰 ||{self._esc(p['price'])}||"
+                )
+                if p["ship"]:
+                    text += f" 🚚 *{self._esc(p['ship'])}*"
+                text += "\n\n"
 
                 buttons.append(
                     [
                         InlineKeyboardButton(
-                            text=f"📦 View item {idx}",
+                            text=f"📦 View {idx}",
                             url=f"https://www.ebay.com/itm/{p['id']}",
                         )
                     ]
                 )
+            utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            text += f"⏱ _Last updated:_ `{utc}`"
+            await self._edit(chat_id, msg.message_id, text, buttons)
 
-            text += f"⏱ _Generated {datetime.now():%Y-%m-%d %H:%M}_"
-            await self.edit_message(chat_id, msg.message_id, text, buttons=buttons)
+    # -----------------------------------------------------------------
+    # MarkdownV2 escaper
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _esc(text: str) -> str:
+        return (
+            text.replace("\\", "\\\\")
+            .replace("_", "\\_")
+            .replace("*", "\\*")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+            .replace("~", "\\~")
+            .replace("`", "\\`")
+            .replace(">", "\\>")
+            .replace("#", "\\#")
+            .replace("+", "\\+")
+            .replace("-", "\\-")
+            .replace("=", "\\=")
+            .replace("|", "\\|")
+            .replace("{", "\\{")
+            .replace("}", "\\}")
+            .replace(".", "\\.")
+            .replace("!", "\\!")
+        )
 
 
 # ----------------------------------------------------------------------
-# CLI entry
+# CLI
 # ----------------------------------------------------------------------
-async def main():
+async def main() -> None:
     if len(sys.argv) != 3:
         print("Usage: python ebay_search_scraper.py <keyword> <chat_id>")
         sys.exit(1)
@@ -251,7 +214,7 @@ async def main():
     keyword = sys.argv[1]
     chat_id = int(sys.argv[2])
 
-    scraper = EbaySearchScraper(os.getenv("TELEGRAM_BOT_TOKEN"))
+    scraper = EbaySearchScraper(BOT_TOKEN)
     await scraper.scrape_search(keyword, chat_id)
 
 
