@@ -87,21 +87,30 @@ class EbaySearchScraper:
             products = await page.evaluate("""
 () => {
     const items = [];
-    document.querySelectorAll('li.s-item, div.s-item__wrapper').forEach(root => {
-        const a = root.querySelector('a[href*="/itm/"]');
-        if (!a) return;
+    // Find all anchor tags that contain /itm/ (item links)
+    document.querySelectorAll('a[href*="/itm/"]').forEach(a => {
+        // Find the nearest parent element that could contain title & price
+        const root = a.closest('li, div');
+        if (!root) return;
 
-        const title = root.querySelector('h3')?.innerText ||
-                      root.querySelector('.s-item__title')?.innerText;
-        const price = root.querySelector('.s-item__price')?.innerText;
-        if (!title || !price) return;
-        if (title.toLowerCase().includes('shop on ebay')) return;
+        // Try multiple ways to get the title
+        let title = root.querySelector('h3')?.innerText ||
+                    root.querySelector('[class*="title"]')?.innerText ||
+                    a.innerText;
+        if (!title || title.toLowerCase().includes('shop on ebay')) return;
+
+        // Try multiple ways to get the price
+        let price = root.querySelector('[class*="price"]')?.innerText;
+        if (!price) return;
+
+        // Shipping
+        let ship = root.querySelector('[class*="shipping"]')?.innerText || '';
 
         items.push({
             id: a.href.split('/').pop().split('?')[0],
             title: title.trim(),
             price: price.trim(),
-            ship: root.querySelector('.s-item__shipping')?.innerText || ''
+            ship: ship.trim()
         });
     });
     return items;
