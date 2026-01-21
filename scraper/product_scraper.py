@@ -1,12 +1,21 @@
 import os
 import sys
 import asyncio
+from datetime import datetime, timezone
 from playwright.async_api import async_playwright
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-class AmazonProductScraper:
+class EbayProductScraper:
     def __init__(self, token):
         self.bot = Bot(token=token)
+    
+    @staticmethod
+    def _esc(text: str) -> str:
+        """Escape special characters for MarkdownV2"""
+        text = text.replace("\\", "\\\\")
+        for ch in r"_[]()*~`>#+=|{}.!-":
+            text = text.replace(ch, "\\" + ch)
+        return text
     
     async def edit_message(self, chat_id, message_id, text, buttons=None):
         """Edit existing message"""
@@ -15,150 +24,202 @@ class AmazonProductScraper:
                 chat_id=chat_id,
                 message_id=message_id,
                 text=text,
-                parse_mode='Markdown',
+                parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
             )
         except Exception as e:
             print(f"Edit failed: {e}")
-            # If edit fails, send new message
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                parse_mode='Markdown',
+                parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
             )
     
-    async def scrape_product(self, asin, chat_id, edit_message_id=None):
-        # Loading message
+    async def scrape_product(self, product_name, chat_id, edit_message_id=None):
+        """Scrape eBay products like search_scraper.py"""
         msg = None
-        if edit_message_id:
+        if edit_message_id and edit_message_id != "undefined":
             await self.edit_message(
                 chat_id, int(edit_message_id),
-                "⏳ **Loading product details...**"
+                "⏳ *Loading eBay products…*"
             )
         else:
             msg = await self.bot.send_message(
                 chat_id=chat_id,
-                text="⏳ **Fetching product details...**"
+                text="⏳ *Searching eBay…*",
+                parse_mode="MarkdownV2"
             )
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
+            
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 720}
             )
+            
             page = await context.new_page()
             
-            url = f"https://www.amazon.com/dp/{asin}"
-            await page.goto(url, wait_until='domcontentloaded')
+            # Load eBay search page
+            if edit_message_id and edit_message_id != "undefined":
+                await self.edit_message(chat_id, int(edit_message_id), "⏳ *Loading eBay…* \\[1/4\\]")
             
-            # Extract details
-            title = await page.locator('#productTitle').inner_text(timeout=3000) or "N/A"
-            title = title.strip()
+            url = f"https://www.ebay.com/sch/i.html?_nkw={product_name.replace(' ', '+')}&_sop=12"
+            await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+            await asyncio.sleep(5)
             
-            # Price
-            price = "N/A"
+            # Scroll to render lazy-loaded items
+            if edit_message_id and edit_message_id != "undefined":
+                await self.edit_message(chat_id, int(edit_message_id), "⏳ *Rendering products…* \\[2/4\\]")
+            
+            for _ in range(6):
+                await page.evaluate("window.scrollBy(0, 1200)")
+                await asyncio.sleep(1.2)
+            
+            # JS extraction with robust selectors
+            if edit_message_id and edit_message_id != "undefined":
+                await self.edit_message(chat_id, int(edit_message_id), "⏳ *Extracting products…* \\[3/4\\]")
+            
             try:
-                price = await page.locator('.a-price.a-text-price.a-size-medium.apexPriceToPay .a-offscreen').inner_text(timeout=2000)
-            except:
-                try:
-                    price = await page.locator('.a-price .a-offscreen').first.inner_text(timeout=2000)
-                except:
-                    price = "Price not available"
+                await page.wait_for_selector("ul.srp-results, div.s-item__wrapper", timeout=15_000)
+            except Exception:
+                print("[WARN] Product container not found, continuing anyway…")
             
-            # Rating
-            rating = "No rating"
-            try:
-                rating = await page.locator('span.a-icon-alt').first.inner_text(timeout=2000)
-                rating = rating.split()[0]
-            except:
-                pass
+            products = await page.evaluate("""
+() => {
+    const items = [];
+    const seen = new Set();
+    
+    document.querySelectorAll('a[href*="/itm/"]').forEach(a => {
+        const href = a.getAttribute('href') || '';
+        const id = href.split('/').pop().split('?')[0];
+        if (!id || seen.has(id)) return;
+        
+        let root = a.closest('li') || a.closest('div[role="option"]') || 
+                   a.closest('div[class*="item"]') || a.closest('article') || 
+                   a.closest('div');
+        if (!root) return;
+        
+        let title = '';
+        [
+            root.querySelector('h3'),
+            root.querySelector('[class*="title"]'),
+            root.querySelector('span[role="heading"]'),
+            a
+        ].forEach(el => {
+            if (!title && el) title = el.innerText || el.textContent || '';
+        });
+        
+        title = title.trim();
+        if (!title || title.toLowerCase().includes('shop on ebay') || title.length < 3) return;
+        
+        let price = '';
+        [
+            root.querySelector('[class*="price"]'),
+            root.querySelector('span[class*="BOLD"]'),
+            root.querySelector('[data-test-component="LISTING_PRICE"]')
+        ].forEach(el => {
+            if (!price && el) price = el.innerText || el.textContent || '';
+        });
+        
+        price = price.trim();
+        if (!price) return;
+        
+        let ship = '';
+        const shippingEl = root.querySelector('[class*="shipping"]') || 
+                          root.querySelector('[class*="SHIPPING"]');
+        if (shippingEl) ship = shippingEl.innerText || shippingEl.textContent || '';
+        
+        items.push({
+            id: id,
+            title: title.substring(0, 100),
+            price: price.substring(0, 50),
+            ship: ship.trim().substring(0, 50)
+        });
+        seen.add(id);
+    });
+    
+    return items;
+}
+""")
             
-            # Availability
-            try:
-                availability = await page.locator('#availability span').inner_text(timeout=2000)
-                availability = availability.strip()
-            except:
-                availability = "Unknown"
+            print(f"[INFO] JS extracted: {len(products)} items")
             
-            # Features
-            features = []
-            try:
-                feature_items = await page.locator('#feature-bullets ul li span').all()
-                for feature in feature_items[:5]:
-                    text = await feature.inner_text(timeout=500)
-                    if text.strip():
-                        features.append(f"• {text.strip()}")
-            except:
-                features = ["No features listed"]
-            
-            # Prime
-            is_prime = await page.locator('#primePopoverFeatures').count() > 0
+            # Take screenshot
+            ss = await page.screenshot(
+                clip={"x": 0, "y": 0, "width": 1280, "height": 720}
+            )
             
             await browser.close()
             
-            # Format message
-            prime_status = "✅ Prime eligible" if is_prime else "❌ Not Prime"
+            # Send screenshot
+            await self.bot.send_photo(
+                chat_id,
+                photo=ss,
+                caption=f"📸 *eBay results for* `{self._esc(product_name)}`",
+                parse_mode="MarkdownV2"
+            )
             
-            message = f"""
-📦 **Product Details**
-
-**{title}**
-
-💰 **Price:** {price}
-⭐ **Rating:** {rating}
-📦 **Availability:** {availability}
-{prime_status}
-
-**Features:**
-{'\n'.join(features)}
-
-🆔 **ASIN:** `{asin}`
-
-🔗 [View on Amazon]({url})
-"""
+            if not products:
+                await self.bot.send_message(
+                    chat_id,
+                    "Rendered visually but JS extraction returned empty",
+                    parse_mode=None,
+                )
+                return
             
-            # Buttons
-            buttons = [[
-                InlineKeyboardButton(text="🔄 Refresh", callback_data=f"details:{asin}"),
-                InlineKeyboardButton(text="🏠 Search More", callback_data="search_again")
-            ]]
+            # Text report + buttons
+            text = f"🔍 *eBay search:* `{self._esc(product_name)}`\n\n"
+            buttons = []
+            
+            for i, p in enumerate(products[:10], 1):
+                text += (
+                    f"{i}\\. **{self._esc(p['title'][:80])}**\n"
+                    f"   💰 ||{self._esc(p['price'])}||"
+                )
+                if p["ship"]:
+                    text += f" 🚚 *{self._esc(p['ship'])}*"
+                text += "\n\n"
+                
+                buttons.append(
+                    [InlineKeyboardButton(f"📦 View {i}", url=f"https://www.ebay.com/itm/{p['id']}")]
+                )
+            
+            utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            text += f"⏱ _Last updated:_ `{utc}`"
             
             # Edit or send message
-            if edit_message_id:
-                await self.edit_message(
-                    chat_id, int(edit_message_id),
-                    message,
-                    buttons=buttons
-                )
+            if edit_message_id and edit_message_id != "undefined":
+                await self.edit_message(chat_id, int(edit_message_id), text, buttons=buttons)
             elif msg:
-                await self.edit_message(
-                    chat_id, msg.message_id,
-                    message,
-                    buttons=buttons
-                )
+                await self.edit_message(chat_id, msg.message_id, text, buttons=buttons)
             else:
                 await self.bot.send_message(
                     chat_id=chat_id,
-                    text=message,
-                    parse_mode='Markdown',
+                    text=text,
+                    parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
 
 async def main():
     if len(sys.argv) < 3:
-        print("Usage: python product_scraper.py <asin> <chat_id> [edit_message_id]")
+        print("Usage: python product_scraper.py <product_name> <chat_id> [edit_message_id]")
         sys.exit(1)
     
-    asin = sys.argv[1]
+    product_name = sys.argv[1]
     chat_id = int(sys.argv[2])
     edit_message_id = sys.argv[3] if len(sys.argv) > 3 else None
     
-    scraper = AmazonProductScraper(os.getenv('TELEGRAM_BOT_TOKEN'))
-    await scraper.scrape_product(asin, chat_id, edit_message_id)
+    scraper = EbayProductScraper(os.getenv("TELEGRAM_BOT_TOKEN"))
+    await scraper.scrape_product(product_name, chat_id, edit_message_id)
 
 if __name__ == "__main__":
     asyncio.run(main())
