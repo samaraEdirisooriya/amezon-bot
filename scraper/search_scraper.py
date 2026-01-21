@@ -4,7 +4,6 @@ import asyncio
 from playwright.async_api import async_playwright
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from datetime import datetime
-import random
 
 class AmazonSearchScraper:
     def __init__(self, token):
@@ -32,7 +31,7 @@ class AmazonSearchScraper:
         )
         
         async with async_playwright() as p:
-            # Launch with stealth mode
+            # Launch with enhanced stealth mode
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -44,10 +43,12 @@ class AmazonSearchScraper:
                     '--no-first-run',
                     '--no-zygote',
                     '--disable-gpu',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
                 ]
             )
             
-            # Add stealth script
+            # Add stealth script and context
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={'width': 1920, 'height': 1080}
@@ -59,6 +60,7 @@ class AmazonSearchScraper:
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                 window.chrome = { runtime: {} };
                 delete navigator.__proto__.connection;
+                Object.defineProperty(document, 'hidden', { get: () => false });
             """)
             
             page = await context.new_page()
@@ -72,68 +74,96 @@ class AmazonSearchScraper:
             search_url = f"https://www.amazon.com/s?k={keyword.replace(' ', '+')}"
             print(f"Loading URL: {search_url}")  # DEBUG LOG
             
-            await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+            await page.goto(search_url, wait_until='domcontentloaded', timeout=60000)
             
-            # Step 2: Wait for results with retry
+            # Wait for page to load
+            await asyncio.sleep(5)
+            
+            # Step 2: Check for CAPTCHA
             await self.edit_message(
                 chat_id, msg.message_id,
-                "⏳ **Waiting for results...** [2/4]"
+                "⏳ **Checking for CAPTCHA...** [2/4]"
             )
             
-            # Try multiple selectors
-            selectors = [
-                '[data-component-type="s-search-result"]',
-                '.s-result-item',
-                '[data-cy="title-recipe-title"]',
-                '.sg-col-inner'
-            ]
+            page_title = await page.title()
+            print(f"Page title: {page_title}")  # DEBUG LOG
             
-            element_found = False
-            for selector in selectors:
-                try:
-                    await page.wait_for_selector(selector, timeout=15000)
-                    print(f"Found selector: {selector}")  # DEBUG LOG
-                    element_found = True
-                    break
-                except:
-                    print(f"Selector not found: {selector}")  # DEBUG LOG
-                    continue
-            
-            if not element_found:
-                # Take screenshot to debug
-                screenshot = await page.screenshot(full_page=True)
-                await self.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=screenshot,
-                    caption="❌ Debug: Could not find products on page"
-                )
+            if "captcha" in page_title.lower() or "robot" in page_title.lower():
                 await self.edit_message(
                     chat_id, msg.message_id,
-                    "❌ Failed to load Amazon search results. Amazon may be blocking the request."
+                    "❌ Amazon detected bot and showing CAPTCHA. Try again later or use a proxy service."
                 )
                 await browser.close()
                 return
             
-            # Step 3: Take screenshot
+            # Step 3: Scroll multiple times to trigger lazy loading
             await self.edit_message(
                 chat_id, msg.message_id,
-                "⏳ **Taking screenshot...** [3/4]"
+                "⏳ **Scrolling to load products...** [3/4]"
             )
             
-            # Scroll to load images
-            await page.evaluate('window.scrollBy(0, 800)')
-            await asyncio.sleep(3)  # Wait for lazy load
+            for scroll in range(3):
+                await page.evaluate('window.scrollBy(0, 1000)')
+                await asyncio.sleep(2)
+                print(f"Scroll {scroll + 1}/3 completed")
             
+            # Step 4: Try multiple selectors with longer timeout
+            await self.edit_message(
+                chat_id, msg.message_id,
+                "⏳ **Searching for products...** [4/4]"
+            )
+            
+            selectors = [
+                '[data-component-type="s-search-result"]',
+                '.s-card-container',
+                '[data-cy="title-recipe-title"]',
+                '.s-result-item'
+            ]
+            
+            elements = []
+            found_selector = None
+            
+            for selector in selectors:
+                try:
+                    print(f"Trying selector: {selector}")
+                    elements = await page.locator(selector).all(timeout=20000)
+                    if elements and len(elements) > 0:
+                        found_selector = selector
+                        print(f"✅ Found {len(elements)} items with {selector}")
+                        break
+                    else:
+                        print(f"❌ No elements found with {selector}")
+                except Exception as e:
+                    print(f"❌ Selector failed: {selector} - {str(e)}")
+                    continue
+            
+            if not elements:
+                # Take full page screenshot for debugging
+                await self.edit_message(
+                    chat_id, msg.message_id,
+                    "❌ No products found. Sending debug screenshot..."
+                )
+                
+                screenshot = await page.screenshot(full_page=True)
+                await self.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=screenshot,
+                    caption=f"❌ Debug Info:\nPage title: {page_title}\nURL: {search_url}\nSelectors tried: {selectors}"
+                )
+                
+                await self.edit_message(
+                    chat_id, msg.message_id,
+                    "❌ Amazon may be blocking requests. Try again later."
+                )
+                await browser.close()
+                return
+            
+            # Take screenshot of loaded page
             screenshot = await page.screenshot(full_page=False, size={'width': 1200, 'height': 800})
             
-            # Step 4: Extract product data
-            await self.edit_message(
-                chat_id, msg.message_id,
-                "⏳ **Extracting product data...** [4/4]"
-            )
-            
+            # Extract product data
             products = []
-            items = await page.locator('[data-component-type="s-search-result"]').all()[:5]
+            items = elements[:5]  # Get first 5 items
             
             for i, item in enumerate(items):
                 try:
@@ -142,16 +172,16 @@ class AmazonSearchScraper:
                     
                     # Title
                     title_locator = item.locator('h2 a span, .s-title-instructions h2 a span')
-                    title = await title_locator.inner_text(timeout=2000) if await title_locator.count() > 0 else "N/A"
+                    title = await title_locator.inner_text(timeout=3000) if await title_locator.count() > 0 else "N/A"
                     title = title[:60] + "..." if len(title) > 60 else title
                     
                     # Price
                     price_locator = item.locator('.a-price-whole, .a-offscreen')
-                    price = await price_locator.inner_text(timeout=2000) if await price_locator.count() > 0 else "N/A"
+                    price = await price_locator.inner_text(timeout=3000) if await price_locator.count() > 0 else "N/A"
                     
                     # Rating
                     rating_locator = item.locator('.a-icon-alt')
-                    rating = await rating_locator.inner_text(timeout=2000) if await rating_locator.count() > 0 else "No rating"
+                    rating = await rating_locator.inner_text(timeout=3000) if await rating_locator.count() > 0 else "No rating"
                     if rating != "No rating":
                         rating = rating.split()[0]
                     
@@ -162,6 +192,7 @@ class AmazonSearchScraper:
                             'price': price,
                             'rating': rating
                         })
+                        print(f"Product {i+1}: {asin} - {title[:30]}...")
                 except Exception as e:
                     print(f"Error extracting item {i}: {e}")
                     continue
@@ -171,7 +202,7 @@ class AmazonSearchScraper:
             if not products:
                 await self.edit_message(
                     chat_id, msg.message_id,
-                    "❌ No products found. Amazon may have blocked the request."
+                    "❌ No valid products found after extraction."
                 )
                 return
             
