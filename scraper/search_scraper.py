@@ -9,7 +9,7 @@ import sys
 import asyncio
 from datetime import datetime, timezone
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 # ---------------------------------------------------------------------
@@ -27,8 +27,6 @@ class EbaySearchScraper:
         self.bot = Bot(token)
 
     # -----------------------------------------------------------------
-    # Safe message editor
-    # -----------------------------------------------------------------
     async def _edit(self, chat_id: int, msg_id: int, text: str, buttons=None) -> None:
         try:
             await self.bot.edit_message_text(
@@ -42,8 +40,6 @@ class EbaySearchScraper:
             print(f"[WARN] edit fail: {exc}")
 
     # -----------------------------------------------------------------
-    # MarkdownV2 escaper
-    # -----------------------------------------------------------------
     @staticmethod
     def _esc(text: str) -> str:
         text = text.replace("\\", "\\\\")
@@ -51,8 +47,6 @@ class EbaySearchScraper:
             text = text.replace(ch, "\\" + ch)
         return text
 
-    # -----------------------------------------------------------------
-    # Core logic
     # -----------------------------------------------------------------
     async def scrape_search(self, keyword: str, chat_id: int) -> None:
         msg = await self.bot.send_message(
@@ -87,11 +81,11 @@ class EbaySearchScraper:
 
             page = await ctx.new_page()
 
-            # 1. Load eBay
+            # 1. Load
             await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* \\[1/4\\]")
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
             await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
             # 2. CAPTCHA check
             await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* \\[2/4\\]")
@@ -101,19 +95,33 @@ class EbaySearchScraper:
                 await browser.close()
                 return
 
-            # 3. Scroll to trigger lazy loading
+            # 3. Scroll
             await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* \\[3/4\\]")
             for _ in range(4):
-                await page.evaluate("window.scrollBy(0, 900)")
-                await asyncio.sleep(1.3)
+                await page.evaluate("window.scrollBy(0, 1000)")
+                await asyncio.sleep(1.5)
 
-            # 4. Wait for REAL items
+            # 4. Wait ONLY for containers (SAFE)
             await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* \\[4/4\\]")
-            await page.wait_for_selector("li.s-item h3.s-item__title", timeout=20_000)
+
+            try:
+                await page.wait_for_selector("li.s-item", timeout=30_000)
+            except PWTimeout:
+                ss = await page.screenshot(
+                    clip={"x": 0, "y": 0, "width": 1280, "height": 720}
+                )
+                await self.bot.send_photo(
+                    chat_id,
+                    photo=ss,
+                    caption="eBay loaded but no result containers",
+                    parse_mode=None,
+                )
+                await browser.close()
+                return
 
             raw_items = page.locator("li.s-item")
             total = await raw_items.count()
-            print(f"[INFO] Raw items found: {total}")
+            print(f"[INFO] Raw items: {total}")
 
             products = []
 
@@ -121,21 +129,21 @@ class EbaySearchScraper:
                 li = raw_items.nth(i)
 
                 try:
-                    title_el = li.locator("h3.s-item__title")
+                    title_el = li.locator("h3.s-item__title, span.s-item__title")
                     if await title_el.count() == 0:
                         continue
 
-                    title = (await title_el.inner_text()).strip()
-                    if not title or title.lower().startswith("shop on ebay"):
+                    title = (await title_el.first.inner_text()).strip()
+                    if not title or "shop on ebay" in title.lower():
                         continue
 
                     price_el = li.locator("span.s-item__price")
                     if await price_el.count() == 0:
                         continue
-                    price = (await price_el.inner_text()).strip()
+                    price = (await price_el.first.inner_text()).strip()
 
                     ship_el = li.locator("span.s-item__shipping")
-                    ship = (await ship_el.inner_text()).strip() if await ship_el.count() else ""
+                    ship = (await ship_el.first.inner_text()).strip() if await ship_el.count() else ""
 
                     link_el = li.locator("a.s-item__link")
                     href = await link_el.get_attribute("href")
@@ -154,7 +162,7 @@ class EbaySearchScraper:
                     )
 
                 except Exception as exc:
-                    print(f"[WARN] Skip item: {exc}")
+                    print(f"[WARN] skip item: {exc}")
 
             print(f"[INFO] Extracted products: {len(products)}")
 
@@ -165,7 +173,7 @@ class EbaySearchScraper:
                 await self.bot.send_photo(
                     chat_id,
                     photo=ss,
-                    caption="No products extracted",
+                    caption="Products visible but extraction returned empty",
                     parse_mode=None,
                 )
                 await browser.close()
@@ -212,18 +220,13 @@ class EbaySearchScraper:
 
 
 # ----------------------------------------------------------------------
-# CLI
-# ----------------------------------------------------------------------
 async def main() -> None:
     if len(sys.argv) != 3:
         print("Usage: python scraper/search_scraper.py <keyword> <chat_id>")
         sys.exit(1)
 
-    keyword = sys.argv[1]
-    chat_id = int(sys.argv[2])
-
-    scraper = EbaySearchScraper(BOT_TOKEN)
-    await scraper.scrape_search(keyword, chat_id)
+    scraper = EbaySearchScraper(os.environ["TELEGRAM_BOT_TOKEN"])
+    await scraper.scrape_search(sys.argv[1], int(sys.argv[2]))
 
 
 if __name__ == "__main__":
