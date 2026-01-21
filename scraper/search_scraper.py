@@ -208,7 +208,7 @@ class EbaySearchScraper:
 # ----------------------------------------------------------------------
 async def main() -> None:
     if len(sys.argv) != 3:
-        print("Usage: python ebay_search_scraper.py <keyword> <chat_id>")
+        print("Usage: python scraper/search_scraper.py <keyword> <chat_id>")
         sys.exit(1)
 
     keyword = sys.argv[1]

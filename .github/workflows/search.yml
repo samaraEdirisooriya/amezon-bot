@@ -1,4 +1,4 @@
-name: Amazon Search Scraper
+name: Amazon Search Scraper          # keep old name if you want
 
 on:
   workflow_dispatch:
@@ -14,19 +14,19 @@ jobs:
   search:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           pip install playwright python-telegram-bot pillow
           playwright install chromium
-      
+
       - name: Run search scraper
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
