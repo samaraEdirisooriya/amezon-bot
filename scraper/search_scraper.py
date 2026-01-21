@@ -42,11 +42,11 @@ class EbaySearchScraper:
             print(f"[WARN] edit fail: {exc}")
 
     # -----------------------------------------------------------------
-    # MarkdownV2 escaper (CORRECT)
+    # MarkdownV2 escaper
     # -----------------------------------------------------------------
     @staticmethod
     def _esc(text: str) -> str:
-        text = text.replace("\\", "\\\\")  # must be first
+        text = text.replace("\\", "\\\\")
         for ch in r"_[]()*~`>#+=|{}.!-":
             text = text.replace(ch, "\\" + ch)
         return text
@@ -93,7 +93,7 @@ class EbaySearchScraper:
             await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             await asyncio.sleep(2)
 
-            # 2. CAPTCHA check (async fixed)
+            # 2. CAPTCHA check
             await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* \\[2/4\\]")
             title = (await page.title()).lower()
             if any(x in title for x in ("captcha", "robot")):
@@ -101,70 +101,88 @@ class EbaySearchScraper:
                 await browser.close()
                 return
 
-            # 3. Scroll
+            # 3. Scroll to trigger lazy loading
             await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* \\[3/4\\]")
-            for _ in range(3):
+            for _ in range(4):
                 await page.evaluate("window.scrollBy(0, 900)")
-                await asyncio.sleep(1.2)
+                await asyncio.sleep(1.3)
 
-            # 4. Collect items
+            # 4. Wait for REAL items
             await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* \\[4/4\\]")
-            items = await page.locator("li.s-item").all()
+            await page.wait_for_selector("li.s-item h3.s-item__title", timeout=20_000)
 
-            if not items:
+            raw_items = page.locator("li.s-item")
+            total = await raw_items.count()
+            print(f"[INFO] Raw items found: {total}")
+
+            products = []
+
+            for i in range(total):
+                li = raw_items.nth(i)
+
+                try:
+                    title_el = li.locator("h3.s-item__title")
+                    if await title_el.count() == 0:
+                        continue
+
+                    title = (await title_el.inner_text()).strip()
+                    if not title or title.lower().startswith("shop on ebay"):
+                        continue
+
+                    price_el = li.locator("span.s-item__price")
+                    if await price_el.count() == 0:
+                        continue
+                    price = (await price_el.inner_text()).strip()
+
+                    ship_el = li.locator("span.s-item__shipping")
+                    ship = (await ship_el.inner_text()).strip() if await ship_el.count() else ""
+
+                    link_el = li.locator("a.s-item__link")
+                    href = await link_el.get_attribute("href")
+                    if not href:
+                        continue
+
+                    item_id = href.split("/")[-1].split("?")[0]
+
+                    products.append(
+                        {
+                            "id": item_id,
+                            "title": title[:80],
+                            "price": price,
+                            "ship": ship,
+                        }
+                    )
+
+                except Exception as exc:
+                    print(f"[WARN] Skip item: {exc}")
+
+            print(f"[INFO] Extracted products: {len(products)}")
+
+            if not products:
                 ss = await page.screenshot(
                     clip={"x": 0, "y": 0, "width": 1280, "height": 720}
                 )
                 await self.bot.send_photo(
                     chat_id,
                     photo=ss,
-                    caption="No items found",
+                    caption="No products extracted",
                     parse_mode=None,
                 )
                 await browser.close()
                 return
 
-            products = []
-            for idx, li in enumerate(items[:6], 1):
-                try:
-                    title = (
-                        await li.locator("h3.s-item__title").first.inner_text()
-                    ).replace("\n", " ")[:70]
-
-                    price = await li.locator("span.s-item__price").first.inner_text()
-                    ship = await li.locator("span.s-item__shipping").first.inner_text()
-                    href = await li.locator("a.s-item__link").first.get_attribute("href")
-
-                    item_id = href.split("/")[-1].split("?")[0] if href else f"id{idx}"
-
-                    products.append(
-                        {
-                            "id": item_id,
-                            "title": title,
-                            "price": price,
-                            "ship": ship,
-                        }
-                    )
-                except Exception as exc:
-                    print(f"[WARN] skip item {idx}: {exc}")
-
-            if not products:
-                await self._edit(chat_id, msg.message_id, "❌ Could not extract data.")
-                await browser.close()
-                return
-
-            # Screenshot (Telegram-safe)
+            # Screenshot
             ss = await page.screenshot(
                 clip={"x": 0, "y": 0, "width": 1280, "height": 720}
             )
             await self.bot.send_photo(
-                chat_id=chat_id,
+                chat_id,
                 photo=ss,
                 caption=f"📸 *eBay results for* `{self._esc(keyword)}`",
                 parse_mode="MarkdownV2",
             )
 
-            # Result message
+            # Text report
             text = f"🔍 *eBay search:* `{self._esc(keyword)}`\n\n"
             buttons = []
 
