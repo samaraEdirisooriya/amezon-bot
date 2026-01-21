@@ -67,7 +67,7 @@ class EbaySearchScraper:
             # 1. Load
             await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay…* \\[1/4\\]")
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
-            await page.goto(url, wait_until="networkidle", timeout=60_000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
             await asyncio.sleep(5)
 
             # 2. Scroll
