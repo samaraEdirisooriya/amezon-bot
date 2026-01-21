@@ -1,0 +1,33 @@
+name: Amazon Search Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: "Search keyword"
+        required: true
+      chat_id:
+        description: "Telegram chat ID"
+        required: true
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install playwright python-telegram-bot pillow
+          playwright install chromium
+      
+      - name: Run search scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python scraper/search_scraper.py "${{ github.event.inputs.keyword }}" "${{ github.event.inputs.chat_id }}"

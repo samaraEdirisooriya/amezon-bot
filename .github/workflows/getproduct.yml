@@ -1,0 +1,36 @@
+name: Amazon Product Details
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: "Amazon ASIN"
+        required: true
+      chat_id:
+        description: "Telegram chat ID"
+        required: true
+      edit_message_id:
+        description: "Message ID to edit (optional)"
+        required: false
+
+jobs:
+  get-product:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install playwright python-telegram-bot
+          playwright install chromium
+      
+      - name: Run product scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python scraper/product_scraper.py "${{ github.event.inputs.product_id }}" "${{ github.event.inputs.chat_id }}" "${{ github.event.inputs.edit_message_id }}"
