@@ -87,37 +87,87 @@ class EbaySearchScraper:
             products = await page.evaluate("""
 () => {
     const items = [];
-    // Find all anchor tags that contain /itm/ (item links)
+    const seen = new Set();
+    
+    // Method 1: Find all /itm/ links and extract upwards
     document.querySelectorAll('a[href*="/itm/"]').forEach(a => {
-        // Find the nearest parent element that could contain title & price
-        const root = a.closest('li, div');
+        const href = a.getAttribute('href') || '';
+        const id = href.split('/').pop().split('?')[0];
+        if (!id || seen.has(id)) return;
+        
+        // Try to find parent containers
+        let root = a.closest('li') || a.closest('div[role="option"]') || 
+                   a.closest('div[class*="item"]') || a.closest('article') || 
+                   a.closest('div');
         if (!root) return;
-
-        // Try multiple ways to get the title
-        let title = root.querySelector('h3')?.innerText ||
-                    root.querySelector('[class*="title"]')?.innerText ||
-                    a.innerText;
-        if (!title || title.toLowerCase().includes('shop on ebay')) return;
-
-        // Try multiple ways to get the price
-        let price = root.querySelector('[class*="price"]')?.innerText;
-        if (!price) return;
-
-        // Shipping
-        let ship = root.querySelector('[class*="shipping"]')?.innerText || '';
-
-        items.push({
-            id: a.href.split('/').pop().split('?')[0],
-            title: title.trim(),
-            price: price.trim(),
-            ship: ship.trim()
+        
+        // Extract title - try many selectors
+        let title = '';
+        [
+            root.querySelector('h3'),
+            root.querySelector('[class*="title"]'),
+            root.querySelector('span[role="heading"]'),
+            root.querySelector('[data-test-component="LISTING_TITLE"]'),
+            a
+        ].forEach(el => {
+            if (!title && el) title = el.innerText || el.textContent || '';
         });
+        
+        title = title.trim();
+        if (!title || title.toLowerCase().includes('shop on ebay') || title.length < 3) return;
+        
+        // Extract price - try many selectors  
+        let price = '';
+        [
+            root.querySelector('[class*="price"]'),
+            root.querySelector('span[class*="BOLD"]'),
+            root.querySelector('[data-test-component="LISTING_PRICE"]'),
+            root.querySelector('.NEGATIVE, .POSITIVE')
+        ].forEach(el => {
+            if (!price && el) price = el.innerText || el.textContent || '';
+        });
+        
+        price = price.trim();
+        if (!price) return;
+        
+        // Extract shipping
+        let ship = '';
+        const shippingEl = root.querySelector('[class*="shipping"]') || 
+                          root.querySelector('[class*="SHIPPING"]') ||
+                          root.querySelector('span:contains("shipping")');
+        if (shippingEl) ship = shippingEl.innerText || shippingEl.textContent || '';
+        
+        items.push({
+            id: id,
+            title: title.substring(0, 100),
+            price: price.substring(0, 50),
+            ship: ship.trim().substring(0, 50)
+        });
+        seen.add(id);
     });
+    
     return items;
 }
 """)
 
             print(f"[INFO] JS extracted: {len(products)} items")
+            
+            # Debug: log first item to see structure
+            if products:
+                print(f"[DEBUG] First product: {products[0]}")
+            else:
+                # If still empty, get diagnostic info
+                diagnostic = await page.evaluate("""
+() => {
+    return {
+        total_itm_links: document.querySelectorAll('a[href*="/itm/"]').length,
+        total_lis: document.querySelectorAll('li').length,
+        total_divs: document.querySelectorAll('div').length,
+        sample_link: document.querySelectorAll('a[href*="/itm/"]')[0]?.href || 'none'
+    };
+}
+""")
+                print(f"[DEBUG] Page diagnostic: {diagnostic}")
 
             # 4. Screenshot
             ss = await page.screenshot(
