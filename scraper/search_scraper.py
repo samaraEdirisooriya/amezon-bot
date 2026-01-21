@@ -91,8 +91,8 @@ class EbaySearchScraper:
             await asyncio.sleep(2)
 
             # 3. captcha check
-            await self._edit(chat_id, msg.message_id, "⏳ *Bot-wall check…* `[2/4]`")
-            if any(x in (await page.title()).lower() for x in ("captcha", "robot")):
+            await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* `[2/4]`")
+            if any(x in page.title().lower() for x in ("captcha", "robot")):
                 await self._edit(chat_id, msg.message_id, "❌ eBay CAPTCHA – try later.")
                 return
 
