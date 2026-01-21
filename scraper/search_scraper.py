@@ -44,6 +44,15 @@ class EbaySearchScraper:
             print(f"[WARN] edit fail: {exc}")
 
     # -----------------------------------------------------------------
+    # Markdown-V2 escaper (complete)
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _esc(text: str) -> str:
+        for ch in r"_[]()*~`>#+=|{}.!-":
+            text = text.replace(ch, "\\" + ch)
+        return text.replace("\\", "\\\\")  # keep last
+
+    # -----------------------------------------------------------------
     # Core
     # -----------------------------------------------------------------
     async def scrape_search(self, keyword: str, chat_id: int) -> None:
@@ -85,25 +94,26 @@ class EbaySearchScraper:
             page = await ctx.new_page()
 
             # 2. load eBay
-            await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* `[1/4]`")
+            await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* \\[1/4]")
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
             await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             await asyncio.sleep(2)
 
-            # 3. captcha check
-            await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* `[2/4]`")
+            # 3. captcha check  (FIX:  NO await)
+            await self._edit(chat_id, msg.message_id, "⏳ *Bot\\-wall check…* \\[2/4]")
             if any(x in page.title().lower() for x in ("captcha", "robot")):
                 await self._edit(chat_id, msg.message_id, "❌ eBay CAPTCHA – try later.")
+                await browser.close()
                 return
 
             # 4. scroll for lazy images
-            await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* `[3/4]`")
+            await self._edit(chat_id, msg.message_id, "⏳ *Scrolling items…* \\[3/4]")
             for i in range(3):
                 await page.evaluate("window.scrollBy(0, 800)")
                 await asyncio.sleep(1.5)
 
             # 5. grab items
-            await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* `[4/4]`")
+            await self._edit(chat_id, msg.message_id, "⏳ *Collecting products…* \\[4/4]")
             selectors = ["li.s-item", "div.s-item__wrapper"]
             items = []
             for sel in selectors:
@@ -146,19 +156,15 @@ class EbaySearchScraper:
             await self.bot.send_photo(
                 chat_id=chat_id,
                 photo=ss,
-                caption=f"📸 *eBay results for* `{keyword}`",
+                caption=f"📸 *eBay results for* `{self._esc(keyword)}`",
                 parse_mode="MarkdownV2",
             )
 
             # 8. pretty message
-            text = f"🔍 *eBay search:* `{keyword}`\n\n"
+            text = f"🔍 *eBay search:* `{self._esc(keyword)}`\n\n"
             buttons = []
             for idx, p in enumerate(products, 1):
-                # spoiler price for fun
-                text += (
-                    f"{idx}\\. **{self._esc(p['title'])}**\n"
-                    f"   💰 ||{self._esc(p['price'])}||"
-                )
+                text += f"{idx}\\. **{self._esc(p['title'])}**\n   💰 ||{self._esc(p['price'])}||"
                 if p["ship"]:
                     text += f" 🚚 *{self._esc(p['ship'])}*"
                 text += "\n\n"
@@ -174,33 +180,6 @@ class EbaySearchScraper:
             utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             text += f"⏱ _Last updated:_ `{utc}`"
             await self._edit(chat_id, msg.message_id, text, buttons)
-
-    # -----------------------------------------------------------------
-    # MarkdownV2 escaper
-    # -----------------------------------------------------------------
-    @staticmethod
-    def _esc(text: str) -> str:
-        return (
-            text.replace("\\", "\\\\")
-            .replace("_", "\\_")
-            .replace("*", "\\*")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
-            .replace("(", "\\(")
-            .replace(")", "\\)")
-            .replace("~", "\\~")
-            .replace("`", "\\`")
-            .replace(">", "\\>")
-            .replace("#", "\\#")
-            .replace("+", "\\+")
-            .replace("-", "\\-")
-            .replace("=", "\\=")
-            .replace("|", "\\|")
-            .replace("{", "\\{")
-            .replace("}", "\\}")
-            .replace(".", "\\.")
-            .replace("!", "\\!")
-        )
 
 
 # ----------------------------------------------------------------------
