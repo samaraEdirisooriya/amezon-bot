@@ -133,8 +133,7 @@ class EbaySearchScraper:
         // Extract shipping
         let ship = '';
         const shippingEl = root.querySelector('[class*="shipping"]') || 
-                          root.querySelector('[class*="SHIPPING"]') ||
-                          root.querySelector('span:contains("shipping")');
+                          root.querySelector('[class*="SHIPPING"]');
         if (shippingEl) ship = shippingEl.innerText || shippingEl.textContent || '';
         
         items.push({
