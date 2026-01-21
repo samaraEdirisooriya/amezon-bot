@@ -93,7 +93,7 @@ class EbaySearchScraper:
             )
             page = await ctx.new_page()
 
-            # 2. load eBay
+            # 2. load eBay  (FIX: no space after _nkw=)
             await self._edit(chat_id, msg.message_id, "⏳ *Loading eBay search…* \\[1/4]")
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
             await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
@@ -160,7 +160,7 @@ class EbaySearchScraper:
                 parse_mode="MarkdownV2",
             )
 
-            # 8. pretty message
+            # 8. pretty message  (FIX: no space in URL)
             text = f"🔍 *eBay search:* `{self._esc(keyword)}`\n\n"
             buttons = []
             for idx, p in enumerate(products, 1):
@@ -173,7 +173,7 @@ class EbaySearchScraper:
                     [
                         InlineKeyboardButton(
                             text=f"📦 View {idx}",
-                            url=f"https://www.ebay.com/itm/{p['id']}",
+                            url=f"https://www.ebay.com/itm/{p['id']}",  # NO space
                         )
                     ]
                 )
