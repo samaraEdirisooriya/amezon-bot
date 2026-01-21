@@ -36,13 +36,13 @@ class EbayProductScraper:
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
             )
     
-    async def scrape_product(self, product_name, chat_id, edit_message_id=None):
-        """Scrape eBay products like search_scraper.py"""
+    async def scrape_product(self, product_input, chat_id, edit_message_id=None):
+        """Scrape eBay product - can be item ID or search term"""
         msg = None
         if edit_message_id and edit_message_id != "undefined":
             await self.edit_message(
                 chat_id, int(edit_message_id),
-                "⏳ *Loading eBay products…*"
+                "⏳ *Loading eBay product…*"
             )
         else:
             msg = await self.bot.send_message(
@@ -50,6 +50,9 @@ class EbayProductScraper:
                 text="⏳ *Searching eBay…*",
                 parse_mode="MarkdownV2"
             )
+        
+        # Check if input is numeric (item ID) or text (search term)
+        is_item_id = product_input.isdigit() and len(product_input) >= 9
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -68,32 +71,113 @@ class EbayProductScraper:
             
             page = await context.new_page()
             
-            # Load eBay search page
-            if edit_message_id and edit_message_id != "undefined":
-                await self.edit_message(chat_id, int(edit_message_id), "⏳ *Loading eBay…* \\[1/4\\]")
-            
-            url = f"https://www.ebay.com/sch/i.html?_nkw={product_name.replace(' ', '+')}&_sop=12"
-            await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
-            await asyncio.sleep(5)
-            
-            # Scroll to render lazy-loaded items
-            if edit_message_id and edit_message_id != "undefined":
-                await self.edit_message(chat_id, int(edit_message_id), "⏳ *Rendering products…* \\[2/4\\]")
-            
-            for _ in range(6):
-                await page.evaluate("window.scrollBy(0, 1200)")
-                await asyncio.sleep(1.2)
-            
-            # JS extraction with robust selectors
-            if edit_message_id and edit_message_id != "undefined":
-                await self.edit_message(chat_id, int(edit_message_id), "⏳ *Extracting products…* \\[3/4\\]")
-            
-            try:
-                await page.wait_for_selector("ul.srp-results, div.s-item__wrapper", timeout=15_000)
-            except Exception:
-                print("[WARN] Product container not found, continuing anyway…")
-            
-            products = await page.evaluate("""
+            if is_item_id:
+                # Direct product fetch
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), "⏳ *Loading product…* \\[1/3\\]")
+                
+                url = f"https://www.ebay.com/itm/{product_input}"
+                await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+                await asyncio.sleep(3)
+                
+                # Extract single product details
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), "⏳ *Extracting product…* \\[2/3\\]")
+                
+                product = await page.evaluate("""
+() => {
+    return {
+        title: document.querySelector('h1 span')?.innerText?.trim() ||
+               document.querySelector('[itemprop="name"]')?.innerText?.trim() || 'N/A',
+        
+        price: document.querySelector('.vi-VR-cvipPrice')?.innerText?.trim() ||
+               document.querySelector('[itemprop="price"]')?.innerText?.trim() ||
+               document.querySelector('[class*="price"]')?.innerText?.trim() || 'N/A',
+        
+        condition: document.querySelector('.SECONDARY_INFO')?.innerText?.trim() ||
+                  document.querySelector('[class*="condition"]')?.innerText?.trim() || 'Used',
+        
+        ship: document.querySelector('[class*="shipping"]')?.innerText?.trim() || 'Check seller',
+        
+        seller: document.querySelector('.mbg')?.innerText?.trim() ||
+               document.querySelector('[class*="seller"]')?.innerText?.trim() || 'Unknown'
+    };
+}
+""")
+                
+                print(f"[INFO] Extracted item: {product}")
+                
+                # Take screenshot
+                ss = await page.screenshot(
+                    clip={"x": 0, "y": 0, "width": 1280, "height": 720}
+                )
+                
+                await browser.close()
+                
+                # Send screenshot
+                await self.bot.send_photo(
+                    chat_id,
+                    photo=ss,
+                    caption=f"📸 *eBay Item* `{self._esc(product_input)}`",
+                    parse_mode="MarkdownV2"
+                )
+                
+                # Format single product message
+                text = f"🛍 *eBay Product*\n\n"
+                text += f"*{self._esc(product['title'][:100])}*\n\n"
+                text += f"💰 ||{self._esc(product['price'])}||\n"
+                text += f"📦 {self._esc(product['condition'])}\n"
+                text += f"🚚 {self._esc(product['ship'])}\n"
+                text += f"🏪 {self._esc(product['seller'])}\n\n"
+                text += f"🆔 `{self._esc(product_input)}`\n\n"
+                
+                utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                text += f"⏱ _Last updated:_ `{utc}`"
+                
+                buttons = [[
+                    InlineKeyboardButton("🔗 View on eBay", url=url),
+                    InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{product_input}")
+                ]]
+                
+                # Edit or send message
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), text, buttons=buttons)
+                elif msg:
+                    await self.edit_message(chat_id, msg.message_id, text, buttons=buttons)
+                else:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+            else:
+                # Search mode
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), "⏳ *Loading eBay…* \\[1/4\\]")
+                
+                url = f"https://www.ebay.com/sch/i.html?_nkw={product_input.replace(' ', '+')}&_sop=12"
+                await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+                await asyncio.sleep(5)
+                
+                # Scroll to render lazy-loaded items
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), "⏳ *Rendering products…* \\[2/4\\]")
+                
+                for _ in range(6):
+                    await page.evaluate("window.scrollBy(0, 1200)")
+                    await asyncio.sleep(1.2)
+                
+                # JS extraction with robust selectors
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), "⏳ *Extracting products…* \\[3/4\\]")
+                
+                try:
+                    await page.wait_for_selector("ul.srp-results, div.s-item__wrapper", timeout=15_000)
+                except Exception:
+                    print("[WARN] Product container not found, continuing anyway…")
+                
+                products = await page.evaluate("""
 () => {
     const items = [];
     const seen = new Set();
@@ -150,76 +234,76 @@ class EbayProductScraper:
     return items;
 }
 """)
-            
-            print(f"[INFO] JS extracted: {len(products)} items")
-            
-            # Take screenshot
-            ss = await page.screenshot(
-                clip={"x": 0, "y": 0, "width": 1280, "height": 720}
-            )
-            
-            await browser.close()
-            
-            # Send screenshot
-            await self.bot.send_photo(
-                chat_id,
-                photo=ss,
-                caption=f"📸 *eBay results for* `{self._esc(product_name)}`",
-                parse_mode="MarkdownV2"
-            )
-            
-            if not products:
-                await self.bot.send_message(
-                    chat_id,
-                    "Rendered visually but JS extraction returned empty",
-                    parse_mode=None,
-                )
-                return
-            
-            # Text report + buttons
-            text = f"🔍 *eBay search:* `{self._esc(product_name)}`\n\n"
-            buttons = []
-            
-            for i, p in enumerate(products[:10], 1):
-                text += (
-                    f"{i}\\. **{self._esc(p['title'][:80])}**\n"
-                    f"   💰 ||{self._esc(p['price'])}||"
-                )
-                if p["ship"]:
-                    text += f" 🚚 *{self._esc(p['ship'])}*"
-                text += "\n\n"
                 
-                buttons.append(
-                    [InlineKeyboardButton(f"📦 View {i}", url=f"https://www.ebay.com/itm/{p['id']}")]
+                print(f"[INFO] JS extracted: {len(products)} items")
+                
+                # Take screenshot
+                ss = await page.screenshot(
+                    clip={"x": 0, "y": 0, "width": 1280, "height": 720}
                 )
-            
-            utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            text += f"⏱ _Last updated:_ `{utc}`"
-            
-            # Edit or send message
-            if edit_message_id and edit_message_id != "undefined":
-                await self.edit_message(chat_id, int(edit_message_id), text, buttons=buttons)
-            elif msg:
-                await self.edit_message(chat_id, msg.message_id, text, buttons=buttons)
-            else:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(buttons)
+                
+                await browser.close()
+                
+                # Send screenshot
+                await self.bot.send_photo(
+                    chat_id,
+                    photo=ss,
+                    caption=f"📸 *eBay results for* `{self._esc(product_input)}`",
+                    parse_mode="MarkdownV2"
                 )
+                
+                if not products:
+                    await self.bot.send_message(
+                        chat_id,
+                        "Rendered visually but JS extraction returned empty",
+                        parse_mode=None,
+                    )
+                    return
+                
+                # Text report + buttons
+                text = f"🔍 *eBay search:* `{self._esc(product_input)}`\n\n"
+                buttons = []
+                
+                for i, p in enumerate(products[:10], 1):
+                    text += (
+                        f"{i}\\. **{self._esc(p['title'][:80])}**\n"
+                        f"   💰 ||{self._esc(p['price'])}||"
+                    )
+                    if p["ship"]:
+                        text += f" 🚚 *{self._esc(p['ship'])}*"
+                    text += "\n\n"
+                    
+                    buttons.append(
+                        [InlineKeyboardButton(f"📦 View {i}", url=f"https://www.ebay.com/itm/{p['id']}")]
+                    )
+                
+                utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                text += f"⏱ _Last updated:_ `{utc}`"
+                
+                # Edit or send message
+                if edit_message_id and edit_message_id != "undefined":
+                    await self.edit_message(chat_id, int(edit_message_id), text, buttons=buttons)
+                elif msg:
+                    await self.edit_message(chat_id, msg.message_id, text, buttons=buttons)
+                else:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
 
 async def main():
     if len(sys.argv) < 3:
-        print("Usage: python product_scraper.py <product_name> <chat_id> [edit_message_id]")
+        print("Usage: python product_scraper.py <item_id_or_search> <chat_id> [edit_message_id]")
         sys.exit(1)
     
-    product_name = sys.argv[1]
+    product_input = sys.argv[1]
     chat_id = int(sys.argv[2])
     edit_message_id = sys.argv[3] if len(sys.argv) > 3 else None
     
     scraper = EbayProductScraper(os.getenv("TELEGRAM_BOT_TOKEN"))
-    await scraper.scrape_product(product_name, chat_id, edit_message_id)
+    await scraper.scrape_product(product_input, chat_id, edit_message_id)
 
 if __name__ == "__main__":
     asyncio.run(main())
