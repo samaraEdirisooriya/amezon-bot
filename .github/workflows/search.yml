@@ -1,4 +1,4 @@
-name: Amazon Search Scraper
+name: eBay Search Scraper
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: "Telegram chat ID"
         required: true
       edit_message_id:
-        description: "Message ID to edit"
+        description: "Telegram message ID to edit"
         required: false
 
 jobs:
@@ -37,4 +37,4 @@ jobs:
           python scraper/search_scraper.py \
           "${{ github.event.inputs.keyword }}" \
           "${{ github.event.inputs.chat_id }}" \
-          "${{ github.event.inputs.edit_message_id }}"
+          "${{ github.event.inputs.edit_message_id || '' }}"

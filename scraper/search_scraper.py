@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Definitive eBay search → Telegram scraper
-CI-safe, MarkdownV2-safe, edit-message aware
+Stable eBay search scraper → Telegram
+GitHub Actions safe
 """
 
 import os
@@ -50,14 +50,13 @@ class EbaySearchScraper:
                 )
             else:
                 msg = await self.bot.send_message(
-                    chat_id,
-                    text,
+                    chat_id=chat_id,
+                    text=text,
                     parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
                 )
                 return msg.message_id
         except Exception as e:
-            print(f"[WARN] Telegram update failed: {e}")
+            print(f"[WARN] Telegram error: {e}")
 
     async def scrape(self, keyword: str, chat_id: int, edit_message_id: Optional[int]):
         msg_id = edit_message_id or await self.send_or_edit(
@@ -81,29 +80,19 @@ class EbaySearchScraper:
 
             page = await ctx.new_page()
 
-            await self.send_or_edit(
-                chat_id, "⏳ *Loading eBay…* \\[1/4\\]", msg_id
-            )
+            await self.send_or_edit(chat_id, "⏳ *Loading eBay…*", msg_id)
 
             url = f"https://www.ebay.com/sch/i.html?_nkw={keyword.replace(' ', '+')}&_sop=12"
             await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
             await asyncio.sleep(4)
 
-            await self.send_or_edit(
-                chat_id, "⏳ *Rendering products…* \\[2/4\\]", msg_id
-            )
-
             for _ in range(6):
-                await page.evaluate("window.scrollBy(0, 1400)")
+                await page.evaluate("window.scrollBy(0, 1500)")
                 await asyncio.sleep(1)
-
-            await self.send_or_edit(
-                chat_id, "⏳ *Extracting products…* \\[3/4\\]", msg_id
-            )
 
             products = await page.evaluate("""
 () => {
-  const out = [];
+  const results = [];
   const seen = new Set();
 
   document.querySelectorAll('a[href*="/itm/"]').forEach(a => {
@@ -111,49 +100,43 @@ class EbaySearchScraper:
     const id = href.split('/').pop().split('?')[0];
     if (!id || seen.has(id)) return;
 
-    let root = a.closest('li') || a.closest('div');
+    const root = a.closest('li') || a.closest('div');
     if (!root) return;
 
-    let title = root.querySelector('h3')?.innerText || a.innerText;
-    let price = root.querySelector('[class*="price"]')?.innerText;
+    const title = root.querySelector('h3')?.innerText || a.innerText;
+    const price = root.querySelector('[class*="price"]')?.innerText;
 
     if (!title || !price) return;
 
-    let ship =
-      root.querySelector('[class*="shipping"]')?.innerText || '';
+    const ship = root.querySelector('[class*="shipping"]')?.innerText || '';
 
-    out.push({
+    results.push({
       id,
       title: title.trim().slice(0, 100),
       price: price.trim().slice(0, 50),
-      ship: ship.trim().slice(0, 50)
+      ship: ship.trim().slice(0, 50),
     });
 
     seen.add(id);
   });
 
-  return out;
+  return results;
 }
 """)
-
-            await self.send_or_edit(
-                chat_id, "⏳ *Finalizing…* \\[4/4\\]", msg_id
-            )
 
             if not products:
                 await self.send_or_edit(
                     chat_id,
-                    "❌ *No products found.* Try another keyword.",
+                    "❌ *No products found. Try another keyword.*",
                     msg_id,
                 )
                 await browser.close()
                 return
 
-            # Screenshot proof
-            ss = await page.screenshot(full_page=False)
+            screenshot = await page.screenshot()
             await self.bot.send_photo(
                 chat_id,
-                ss,
+                screenshot,
                 caption=f"📸 *Results for* `{esc(keyword)}`",
                 parse_mode="MarkdownV2",
             )
@@ -170,12 +153,12 @@ class EbaySearchScraper:
                     text += f" 🚚 _{esc(p['ship'])}_"
                 text += "\n\n"
 
-                buttons.append(
-                    [InlineKeyboardButton(
+                buttons.append([
+                    InlineKeyboardButton(
                         f"📦 View {i}",
                         url=f"https://www.ebay.com/itm/{p['id']}"
-                    )]
-                )
+                    )
+                ])
 
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             text += f"⏱ _Updated:_ `{ts}`"
@@ -191,7 +174,9 @@ async def main():
 
     keyword = sys.argv[1]
     chat_id = int(sys.argv[2])
-    edit_id = int(sys.argv[3]) if len(sys.argv) == 4 and sys.argv[3] else None
+
+    raw_edit = sys.argv[3] if len(sys.argv) >= 4 else None
+    edit_id = int(raw_edit) if raw_edit and raw_edit.isdigit() else None
 
     scraper = EbaySearchScraper(BOT_TOKEN)
     await scraper.scrape(keyword, chat_id, edit_id)
