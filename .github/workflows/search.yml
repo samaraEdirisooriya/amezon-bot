@@ -1,4 +1,4 @@
-name: Amazon Search Scraper          # keep old name if you want
+name: Amazon Search Scraper
 
 on:
   workflow_dispatch:
@@ -9,18 +9,21 @@ on:
       chat_id:
         description: "Telegram chat ID"
         required: true
+      edit_message_id:
+        description: "Message ID to edit"
+        required: false
 
 jobs:
   search:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -31,4 +34,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          python scraper/search_scraper.py "${{ github.event.inputs.keyword }}" "${{ github.event.inputs.chat_id }}"
+          python scraper/search_scraper.py \
+          "${{ github.event.inputs.keyword }}" \
+          "${{ github.event.inputs.chat_id }}" \
+          "${{ github.event.inputs.edit_message_id }}"
